@@ -43,10 +43,10 @@ Para generar el programa tú mismo: `build.bat` (crea `dist\BuscadorNovelas\` y 
 
    | Escribes | Significa |
    |---|---|
-   | `cultivación sistema` | deben aparecer las dos ideas (con sinónimos) |
-   | `sistema\|system` | una u otra |
-   | `-harén` | excluir |
-   | `"frase exacta"` | frase literal |
+   | `修仙 系统` (cultivación sistema) | deben aparecer las dos ideas |
+   | `系统\|system` (sistema o system) | una u otra |
+   | `-后宫` (excluir «harén») | excluir esa palabra |
+   | `"都市修仙"` («cultivación urbana») | frase literal |
    | `AI` | con **mayúsculas** se busca *exactamente* así (sin sinónimos y distinguiendo mayúsculas) |
    | `ai` + casilla «Palabra completa» | no encuentra «m**ai**n» ni «vill**ai**n» |
 
@@ -76,4 +76,4 @@ Línea de comandos: `python novel_search.py --help` (`importar`, `buscar`, `expo
 
 ## Desarrollo
 
-`python tests/test_basico.py` ejecuta las pruebas sin red. Licencia MIT (pon tu nombre en `LICENSE`).
+`python tests/test_basico.py` ejecuta las pruebas sin red. Licencia MIT (ver `LICENSE`).
