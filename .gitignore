@@ -1,0 +1,8 @@
+# El catálogo y las exportaciones son datos personales: nunca se publican
+*.db
+catalogo*.json
+registro_429.txt
+build/
+dist/
+__pycache__/
+*.pyc
