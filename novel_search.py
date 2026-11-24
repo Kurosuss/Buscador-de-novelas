@@ -817,7 +817,9 @@ def cmd_buscar(a):
             fn = eng["make"]()
             con = open_db()
             done, failed, reason = traductor.translate_rows(
-                con, [r["row"] for r in res], fn, pause=a.pausa, engine=eng, force=a.retraducir, one_by_one=not a.lotes,
+                con, [r["row"] for r in res], fn, engine=eng, force=a.retraducir,
+                pause=eng.get("pause", 3.0) if a.pausa is None else a.pausa,
+                one_by_one=(False if a.lotes else True if a.uno_por_uno else eng.get("one_by_one", True)),
                 progress=lambda d, t: print(f"\r  traduciendo {d}/{t}", end="", flush=True))
             con.close()
             print()
@@ -962,16 +964,25 @@ def run_gui():
     btn_tr.pack(side="left", padx=(0, 6))
     ttk.Label(row4, text="Motor:").pack(side="left")
     eng_labels = {v["label"]: k for k, v in traductor.ENGINES.items()}
-    engine_v = tk.StringVar(value=traductor.ENGINES[traductor.DEFAULT_ENGINE]["label"])
-    ttk.Combobox(row4, textvariable=engine_v, values=list(eng_labels), state="readonly",
-                 width=28).pack(side="left", padx=(2, 6))
-    single_v = tk.BooleanVar(value=True)
+    def_eng = traductor.ENGINES[traductor.DEFAULT_ENGINE]
+    engine_v = tk.StringVar(value=def_eng["label"])
+    eng_box = ttk.Combobox(row4, textvariable=engine_v, values=list(eng_labels), state="readonly", width=28)
+    eng_box.pack(side="left", padx=(2, 6))
+    single_v = tk.BooleanVar(value=def_eng.get("one_by_one", True))
     ttk.Checkbutton(row4, text="Uno por uno", variable=single_v).pack(side="left", padx=(0, 6))
     retr_v = tk.BooleanVar(value=False)
     ttk.Checkbutton(row4, text="Volver a traducir", variable=retr_v).pack(side="left", padx=(0, 6))
     ttk.Label(row4, text="Pausa (s):").pack(side="left")
-    pause_v = tk.StringVar(value="3")
-    ttk.Spinbox(row4, from_=0, to=60, increment=1, width=4, textvariable=pause_v).pack(side="left", padx=(2, 8))
+    pause_v = tk.StringVar(value=f"{def_eng.get('pause', 3.0):g}")
+    ttk.Spinbox(row4, from_=0, to=60, increment=0.1, width=5, textvariable=pause_v).pack(side="left", padx=(2, 8))
+
+    def on_engine(_=None):
+        """Al cambiar de motor se ponen su pausa y su «Uno por uno» recomendados (se pueden cambiar a mano)."""
+        e = traductor.ENGINES[eng_labels.get(engine_v.get(), traductor.DEFAULT_ENGINE)]
+        pause_v.set(f"{e.get('pause', 3.0):g}")
+        single_v.set(e.get("one_by_one", True))
+        set_status(f"Motor: {e['label']} — {e.get('note', '')}")
+    eng_box.bind("<<ComboboxSelected>>", on_engine)
     ttk.Label(bottom, textvariable=status_bar, foreground="#555", wraplength=1000).pack(anchor="w")
 
     def set_status(msg):
@@ -1096,7 +1107,7 @@ def run_gui():
         try:
             pause = max(0.0, min(60.0, float(pause_v.get().replace(",", "."))))
         except ValueError:
-            pause = 3.0
+            pause = 0.3
         eng_key = eng_labels.get(engine_v.get(), traductor.DEFAULT_ENGINE)
         eng, force, single = traductor.ENGINES[eng_key], retr_v.get(), single_v.get()
 
@@ -1266,9 +1277,11 @@ def main():
     p.add_argument("--con-repetidos", action="store_true", help="no ocultar las novelas repetidas")
     p.add_argument("--motor", choices=list(traductor.ENGINES), default=traductor.DEFAULT_ENGINE,
                    help="motor de traducción gratuito: " + ", ".join(traductor.ENGINES))
-    p.add_argument("--lotes", action="store_true", help="agrupar varios títulos por petición (por defecto: uno por uno)")
+    p.add_argument("--lotes", action="store_true", help="agrupar varios títulos por petición")
+    p.add_argument("--uno-por-uno", action="store_true", help="un título por petición (más lento, más preciso)")
     p.add_argument("--retraducir", action="store_true", help="ignora las traducciones guardadas")
-    p.add_argument("--pausa", type=float, default=3.0, help="segundos de espera entre lotes de traducción (def. 3)")
+    p.add_argument("--pausa", type=float, default=None,
+                   help="segundos mínimos entre peticiones (por defecto, la recomendada del motor)")
     p.add_argument("--traducir", action="store_true", help="traduce los títulos al español (Google Translate)")
     p = sub.add_parser("importar", help="importa páginas guardadas con el navegador (Ctrl+S) de los sitios compatibles")
     p.add_argument("rutas", nargs="+", help="archivos .html o carpetas")

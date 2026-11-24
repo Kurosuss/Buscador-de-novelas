@@ -48,6 +48,23 @@ def test_importar_y_exportar():
     assert ns.export_catalog(os.path.join(d, "c.json"), db_path=db)[0] == 1
 
 
+def test_traduccion_en_lotes():
+    import sqlite3
+    import traductor as T
+    calls = []
+
+    def fake(text):
+        calls.append(text)
+        return "\n".join("ES:" + ln for ln in text.split("\n"))
+    rs = [{"site": "s", "id": str(i), "title": f"标题{i}"} for i in range(120)]
+    e = T.ENGINES[T.DEFAULT_ENGINE]
+    done, failed, reason = T.translate_rows(sqlite3.connect(":memory:"), rs, fake, engine=e, pause=0,
+                                            one_by_one=False, log=lambda m: None)
+    assert (done, failed, reason) == (120, 0, None)
+    assert all(r["title_es"] == "ES:" + r["title"] for r in rs)
+    assert len(calls) < 10                                           # en lotes, no uno por uno
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

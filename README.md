@@ -50,8 +50,10 @@ Para generar el programa tú mismo: `build.bat` (crea `dist\BuscadorNovelas\` y 
    | `AI` | con **mayúsculas** se busca *exactamente* así (sin sinónimos y distinguiendo mayúsculas) |
    | `ai` + casilla «Palabra completa» | no encuentra «m**ai**n» ni «vill**ai**n» |
 
-3. **Traducir títulos al español** (opcional): elige el motor, la pausa y si quieres «uno por uno».
-   Las traducciones se guardan y no se repiten.
+3. **Traducir títulos al español** (opcional). El motor por defecto, **«Google rápido (como Calibre)»**, usa la
+   misma vía que el plugin Ebook Translator de Calibre: manda los títulos en lotes y hace varias peticiones a la
+   vez, así que cientos de títulos se traducen en segundos. Si Google te bloquea, sube la «Pausa»; si algún título
+   sale mezclado con otro, marca «Uno por uno». Las traducciones se guardan y no se repiten.
 
 4. **Exportar catálogo (navegador):** genera `catalogo.json` para el userscript de `userscript/`
    (Violentmonkey o Tampermonkey), que añade el mismo buscador y los títulos en español dentro de las propias páginas.

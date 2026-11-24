@@ -1,11 +1,14 @@
 """Traducción chino -> español de títulos y sinopsis, con caché en la base de datos local.
 
-Usa Google Translate a través de la librería «deep-translator» (no oficial, sin clave de API).
+Motor principal: Google Translate por la misma vía que el plugin Ebook Translator de Calibre
+(translate.googleapis.com, sin clave de API), en lotes y con varias peticiones a la vez.
 Cada texto se traduce una sola vez: el resultado queda guardado y se reutiliza.
 """
 import re
+import threading
 import time
 import zlib
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS translations(
@@ -21,14 +24,33 @@ BATCH_CHARS = 3000        # tamaño máximo de un lote de títulos
 BATCH_ITEMS = 40
 
 
-def make_google(source="auto", target="es"):
-    """Devuelve una función texto -> texto. Lanza RuntimeError si falta la librería."""
-    try:
-        from deep_translator import GoogleTranslator
-    except ImportError as e:
-        raise RuntimeError("Falta la librería de traducción. Instálala con:  pip install deep-translator") from e
-    tr = GoogleTranslator(source=source, target=target)
-    return lambda text: tr.translate(text)
+GTX_URL = "https://translate.googleapis.com/translate_a/single"
+
+
+def make_google_fast(source="auto", target="es"):
+    """Google Translate por la misma vía que usa «Google (Free)» del plugin Ebook Translator de Calibre:
+    la API pública translate.googleapis.com (client=gtx). Devuelve JSON directo, sin cargar páginas web,
+    así que es mucho más rápida y ligera que la vía de deep-translator. No necesita librerías extra."""
+    import requests
+    local = threading.local()          # una sesión por hilo (se traduce en paralelo)
+
+    def sess():
+        s = getattr(local, "s", None)
+        if s is None:
+            s = local.s = requests.Session()
+            s.headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        return s
+
+    def fn(text):
+        r = sess().get(GTX_URL, params={"client": "gtx", "sl": source, "tl": target, "dt": "t", "q": text},
+                       timeout=20)
+        if r.status_code == 429:
+            raise RateLimited("Google: 429 too many requests")
+        r.raise_for_status()
+        data = r.json()
+        return "".join(seg[0] for seg in (data[0] or []) if seg and isinstance(seg[0], str))
+    return fn
 
 
 def _need_lib():
@@ -106,18 +128,20 @@ def make_lingva(source="auto", target="es"):
 
 
 # clave -> motor. chunk/batch_*: límites por petición; batch_items=1 = un título por petición.
+# workers: peticiones a la vez · pause: pausa recomendada (s) · one_by_one: valor recomendado de «Uno por uno».
 ENGINES = {
-    "google": {"label": "Google Translate", "make": make_google, "chunk": MAX_CHUNK,
-               "batch_chars": BATCH_CHARS, "batch_items": BATCH_ITEMS,
-               "note": "el más completo; puede bloquear si se abusa"},
+    # chunk 800: con GET cada carácter chino ocupa ~9 bytes en la URL; 800 ≈ 7 KB, dentro del límite de Google
+    "google_rapido": {"label": "Google rápido (como Calibre)", "make": make_google_fast, "chunk": 800,
+                      "batch_chars": 800, "batch_items": 50, "workers": 4, "pause": 0.3, "one_by_one": False,
+                      "note": "lotes + 4 peticiones a la vez; si Google bloquea, sube la pausa"},
     "lingva": {"label": "Lingva (Google, sin clave)", "make": make_lingva, "chunk": 1200,
-               "batch_chars": 1000, "batch_items": 15,
+               "batch_chars": 1000, "batch_items": 15, "workers": 1, "pause": 3.0, "one_by_one": True,
                "note": "gratuito; depende de servidores públicos"},
     "mymemory": {"label": "MyMemory (gratis, cuota diaria)", "make": make_mymemory, "chunk": 150,
-                 "batch_chars": 150, "batch_items": 1,
+                 "batch_chars": 150, "batch_items": 1, "workers": 1, "pause": 3.0, "one_by_one": True,
                  "note": "~5 000 caracteres/día; un título por petición"},
 }
-DEFAULT_ENGINE = "google"
+DEFAULT_ENGINE = "google_rapido"
 
 
 def split_chunks(text, limit=MAX_CHUNK):
@@ -140,6 +164,29 @@ class RateLimited(Exception):
     """Google respondió «demasiadas peticiones»: hay que parar, no insistir."""
 
 
+class Cancelled(Exception):
+    """El usuario detuvo la traducción (o otro hilo se topó con un bloqueo)."""
+
+
+class _Gate:
+    """Espacia las peticiones: entre el inicio de una y el de la siguiente pasan al menos `interval` s,
+    aunque se hagan desde varios hilos."""
+
+    def __init__(self, interval, halt):
+        self.interval, self.halt = max(0.0, interval), halt
+        self.lock, self.next = threading.Lock(), 0.0
+
+    def wait(self):
+        if self.halt.is_set():
+            raise Cancelled()
+        with self.lock:
+            t = max(time.monotonic(), self.next)
+            self.next = t + self.interval
+        d = t - time.monotonic()
+        if d > 0 and self.halt.wait(d):
+            raise Cancelled()
+
+
 def _is_rate_limit(e):
     msg = (type(e).__name__ + " " + str(e)).lower()
     return "toomanyrequests" in msg or "too many requests" in msg or "429" in msg
@@ -149,6 +196,8 @@ def _call(fn, text, tries=4, base=5.0):
     for i in range(tries):
         try:
             return fn(text)
+        except (Cancelled, RateLimited):
+            raise
         except Exception as e:  # noqa: BLE001  (bloqueo temporal, red, etc.)
             if _is_rate_limit(e):
                 raise RateLimited(str(e)) from e      # insistir solo alarga el bloqueo
@@ -253,45 +302,77 @@ def translate_rows(con, rows, fn, lang="es", pause=3.0, stop=None, progress=None
     if cur:
         units.append(cur)
 
-    streak, last_err = 0, ""
-    for unit in units:
-        if stop is not None and stop.is_set():
+    # ---- traducir: varias unidades a la vez (workers), con las peticiones espaciadas por `pause` ----
+    halt = threading.Event()                     # para a todos los hilos (cancelación o bloqueo)
+    gate = _Gate(pause, halt)
+
+    def gfn(text):
+        gate.wait()
+        return fn(text)
+
+    def work(unit):
+        srcs = [it[0][it[1]].strip() for it in unit]
+        if len(unit) > 1:
+            parts = translate_text("\n".join(srcs), gfn, 0, chunk).split("\n")
+            if len(parts) == len(unit):
+                return [p.strip() for p in parts]
+        # lote desalineado o texto largo: de uno en uno
+        return [translate_text(src, gfn, 0, chunk) for src in srcs]
+
+    workers = max(1, int(eng.get("workers", 1)))
+    ex = ThreadPoolExecutor(max_workers=workers)
+    queue, pending = iter(units), {}
+    streak, last_err, reason = 0, "", None
+
+    def feed():
+        while len(pending) < workers * 2 and not halt.is_set():
+            unit = next(queue, None)
+            if unit is None:
+                return
+            pending[ex.submit(work, unit)] = unit
+
+    try:
+        feed()
+        while pending:
+            if stop is not None and stop.is_set():
+                reason = "cancelado"
+                break
+            finished, _ = wait(list(pending), timeout=0.25, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                unit = pending.pop(fut)
+                try:
+                    outs = fut.result()
+                except Cancelled:
+                    continue
+                except RateLimited:
+                    reason = reason or (
+                        f"{name} limitó temporalmente las traducciones («demasiadas peticiones» o cuota agotada). "
+                        "Me detuve para no alargar el bloqueo. Lo ya traducido está guardado. Espera un rato "
+                        "(a veces hasta 24 h), sube la «Pausa», cambia de motor o prueba desde otra red, "
+                        "y vuelve a pulsar Traducir.")
+                    halt.set()
+                    continue
+                except Exception as e:  # noqa: BLE001
+                    st["failed"] += len(unit)
+                    streak += 1
+                    last_err = f"{type(e).__name__}: {str(e).strip()[:200]}"
+                    log(f"  ✗ {last_err}")
+                    if streak >= MAX_CONSECUTIVE_FAILS and not reason:
+                        reason = (f"{name} dejó de responder. Último error → {last_err}. Espera 10–15 minutos "
+                                  "o prueba otro motor y vuelve a pulsar Traducir: lo ya traducido está guardado.")
+                        halt.set()
+                    tick(len(unit))
+                    continue
+                for it, es in zip(unit, outs):
+                    save(it, es)
+                streak = 0
+                tick(len(unit))
             con.commit()
-            return st["done"], st["failed"], "cancelado"
-        try:
-            srcs = [it[0][it[1]].strip() for it in unit]
-            outs = None
-            if len(unit) > 1:
-                parts = translate_text("\n".join(srcs), fn, pause, chunk).split("\n")
-                if len(parts) == len(unit):
-                    outs = [p.strip() for p in parts]
-                if unit is not units[-1]:
-                    _wait(pause, stop)             # pausa entre lotes
-            if outs is None:                     # lote desalineado o texto largo: de uno en uno
-                outs = []
-                for src in srcs:
-                    outs.append(translate_text(src, fn, pause, chunk))
-                    _wait(pause, stop)
-            for it, es in zip(unit, outs):
-                save(it, es)
-            streak = 0
-        except RateLimited:
-            con.commit()
-            return st["done"], st["failed"], (
-                f"{name} limitó temporalmente las traducciones («demasiadas peticiones» o cuota agotada). Me "
-                "detuve para no alargar el bloqueo. Lo ya traducido está guardado. Espera un rato (a veces hasta "
-                "24 h), cambia de motor en la lista «Motor» o prueba desde otra red, y vuelve a pulsar Traducir.")
-        except Exception as e:  # noqa: BLE001
-            st["failed"] += len(unit)
-            streak += 1
-            last_err = f"{type(e).__name__}: {str(e).strip()[:200]}"
-            log(f"  ✗ {last_err}")
-            if streak >= MAX_CONSECUTIVE_FAILS:
-                con.commit()
-                return st["done"], st["failed"], (
-                    f"{name} dejó de responder. Último error → {last_err}. "
-                    "Espera 10–15 minutos o prueba otro motor y vuelve a pulsar Traducir: lo ya traducido está guardado.")
-        tick(len(unit))
+            if reason:
+                break
+            feed()
+    finally:
+        halt.set()                               # los hilos que esperan turno se cancelan enseguida
+        ex.shutdown(wait=False, cancel_futures=True)
         con.commit()
-    con.commit()
-    return st["done"], st["failed"], None
+    return st["done"], st["failed"], reason
